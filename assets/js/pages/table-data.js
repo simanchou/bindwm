@@ -46,7 +46,7 @@ $(document).ready(function() {
     }
     
     var t = $('#example3').DataTable( {
-            "order": [[ 2, "desc" ]]
+            "order": [[ 1, "desc" ]]
         } );
  
     $('#add-row').on( 'click', function () {
@@ -68,11 +68,6 @@ $(document).ready(function() {
 
             return false;
         }
-    });
-
-    $("#domain-input").on('click', function () {
-        alert("add successful.");
-        //window.location.href=location.href;
     });
     
     $('.date-picker').datepicker({
