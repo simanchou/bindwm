@@ -1,12 +1,14 @@
 package main
 
 import (
+	"crypto/md5"
 	"encoding/json"
 	"fmt"
 	"github.com/boltdb/bolt"
 	"html/template"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -23,7 +25,7 @@ type DomainResponseData struct {
 type Domain struct {
 	Name    string
 	Serial  int64
-	Records []RecordINFO
+	Records map[string]RecordINFO
 	Created string
 }
 
@@ -48,9 +50,10 @@ func main() {
 	staticFiles := http.FileServer(http.Dir("assets"))
 	http.Handle("/assets/", http.StripPrefix("/assets/", staticFiles))
 
-	http.HandleFunc("/domain", domainList)
+	http.HandleFunc("/", domainList)
 	http.HandleFunc("/domaindel", domainDel)
 	http.HandleFunc("/record", recordList)
+	http.HandleFunc("/recorddel", recordDel)
 
 	http.ListenAndServe(":9001", nil)
 }
@@ -62,11 +65,7 @@ func domainList(w http.ResponseWriter, r *http.Request) {
 	}
 	defer StorageDB.Close()
 
-	drd := DomainResponseData{
-		IsPost:       false,
-		HaveError:    false,
-		ErrorMessage: "no error",
-	}
+	var domainsList []Domain
 
 	err = StorageDB.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("domains"))
@@ -77,7 +76,7 @@ func domainList(w http.ResponseWriter, r *http.Request) {
 		for k, v := c.First(); k != nil; k, v = c.Next() {
 			d := Domain{}
 			json.Unmarshal(v, &d)
-			drd.Data = append(drd.Data, d)
+			domainsList = append(domainsList, d)
 		}
 		return nil
 	})
@@ -88,8 +87,9 @@ func domainList(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case "GET":
+		log.Printf("%#v", domainsList)
 		tmpl := template.Must(template.ParseFiles("tmpl/domain-list.html"))
-		tmpl.Execute(w, drd)
+		tmpl.Execute(w, domainsList)
 	case "POST":
 		r.ParseForm()
 		domainForAdd := r.PostFormValue("domain-name")
@@ -97,6 +97,9 @@ func domainList(w http.ResponseWriter, r *http.Request) {
 		d := Domain{}
 		err = StorageDB.View(func(tx *bolt.Tx) error {
 			b := tx.Bucket([]byte("domains"))
+			if b == nil {
+				return fmt.Errorf("first-time-running")
+			}
 			v := b.Get([]byte(domainForAdd))
 			json.Unmarshal(v, &d)
 			return nil
@@ -107,7 +110,7 @@ func domainList(w http.ResponseWriter, r *http.Request) {
 			domain := &Domain{
 				Name:    domainForAdd,
 				Serial:  0,
-				Records: []RecordINFO{},
+				Records: make(map[string]RecordINFO),
 				Created: time.Now().Format(TimeFormat),
 			}
 
@@ -127,7 +130,7 @@ func domainList(w http.ResponseWriter, r *http.Request) {
 			if err == nil {
 				log.Printf("domain %q add to DB successful\n", domain.Name)
 			}
-			http.Redirect(w, r, "/domain", http.StatusSeeOther)
+			http.Redirect(w, r, "/", http.StatusSeeOther)
 		} else {
 			log.Printf("domain %q is exist\n", domainForAdd)
 			d := Domain{Name: domainForAdd}
@@ -178,7 +181,7 @@ func domainDel(w http.ResponseWriter, r *http.Request) {
 
 		if err == nil {
 			log.Printf("delete domain %q successful\n", domainForDel)
-			http.Redirect(w, r, "/domain", http.StatusSeeOther)
+			http.Redirect(w, r, "/", http.StatusSeeOther)
 		} else {
 			e := fmt.Sprintf("delete domain %q fail, error: %s\n", domainForDel, err)
 			w.Write([]byte(e))
@@ -191,11 +194,172 @@ func domainDel(w http.ResponseWriter, r *http.Request) {
 func recordList(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "GET":
+		StorageDB, err := bolt.Open("bindwm.db", 0600, nil)
+		if err != nil {
+			log.Fatalf("init db fail, error: %s", err)
+		}
+		defer StorageDB.Close()
+
+		r.ParseForm()
+		domain := r.FormValue("domain")
+		d1 := Domain{}
+		err = StorageDB.View(func(tx *bolt.Tx) error {
+			b := tx.Bucket([]byte("domains"))
+			v := b.Get([]byte(domain))
+			json.Unmarshal(v, &d1)
+			return nil
+		})
+		fmt.Printf("%#v\n", d1)
+
 		tmpl := template.Must(template.ParseFiles("tmpl/record-list.html"))
-		tmpl.Execute(w, "")
+		tmpl.Execute(w, d1)
 	case "POST":
+		StorageDB, err := bolt.Open("bindwm.db", 0600, nil)
+		if err != nil {
+			log.Fatalf("init db fail, error: %s", err)
+		}
+		defer StorageDB.Close()
+
 		log.Println("this is a POST action")
+		r.ParseForm()
+		fmt.Println(r.PostForm)
+		domain := r.PostFormValue("domain")
+		record := r.PostFormValue("record")
+		recordType := r.PostFormValue("record-type")
+		pointsTo := r.PostFormValue("pointsto")
+		ttl := r.PostFormValue("ttl")
+		recordID := stringToMD5(record + recordType + pointsTo)
+		fmt.Println(recordID, record, recordType, pointsTo, ttl)
+
+		recordEntry := RecordINFO{
+			ID:       recordID,
+			Record:   record,
+			Type:     recordType,
+			PointsTo: pointsTo,
+		}
+
+		if len(ttl) > 0 {
+			ttlInt, _ := strconv.Atoi(ttl)
+			recordEntry.TTL = ttlInt
+		} else {
+			recordEntry.TTL = 600
+		}
+
+		d2 := Domain{}
+		err = StorageDB.View(func(tx *bolt.Tx) error {
+			b := tx.Bucket([]byte("domains"))
+			v := b.Get([]byte(domain))
+			json.Unmarshal(v, &d2)
+			return nil
+		})
+		fmt.Printf("%#v\n", d2)
+		d2.Serial += 1
+		d2.Records[recordID] = recordEntry
+
+		err = StorageDB.Update(func(tx *bolt.Tx) error {
+			b, err := tx.CreateBucketIfNotExists([]byte("domains"))
+			encoded, err := json.Marshal(d2)
+			if err != nil {
+				return nil
+			}
+			return b.Put([]byte(d2.Name), encoded)
+		})
+
+		fmt.Printf("%#v\n", d2)
+
+		if err == nil {
+			log.Printf("add record for domain %q successful\n", domain)
+			http.Redirect(w, r, fmt.Sprintf("/record?domain=%s", domain), http.StatusSeeOther)
+		} else {
+			e := fmt.Sprintf("add record for domain  %q fail, error: %s\n", domain, err)
+			w.Write([]byte(e))
+		}
+
 	default:
 		log.Println("unknown action")
 	}
+}
+
+func recordDel(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case "GET":
+		StorageDB, err := bolt.Open("bindwm.db", 0600, nil)
+		if err != nil {
+			log.Fatalf("init db fail, error: %s", err)
+		}
+		defer StorageDB.Close()
+
+		fmt.Println("this is a GET action")
+		r.ParseForm()
+		fmt.Println(r.Form)
+		domain := r.FormValue("domain")
+		recordID := r.FormValue("record_id")
+
+		d1 := Domain{}
+		err = StorageDB.View(func(tx *bolt.Tx) error {
+			b := tx.Bucket([]byte("domains"))
+			v := b.Get([]byte(domain))
+			json.Unmarshal(v, &d1)
+			return nil
+		})
+
+		type dataForResponse struct {
+			Name   string
+			Record RecordINFO
+		}
+
+		dfr := dataForResponse{}
+		dfr.Name = d1.Name
+		dfr.Record = d1.Records[recordID]
+
+		fmt.Printf("%#v\n", dfr)
+
+		tmpl := template.Must(template.ParseFiles("tmpl/record-del.html"))
+		tmpl.Execute(w, dfr)
+	case "POST":
+		StorageDB, err := bolt.Open("bindwm.db", 0600, nil)
+		if err != nil {
+			log.Fatalf("init db fail, error: %s", err)
+		}
+		defer StorageDB.Close()
+
+		fmt.Println("this is a POST action")
+		r.ParseForm()
+		domain := r.PostFormValue("record-del-domain-input")
+		recordID := r.PostFormValue("record-del-id-input")
+
+		d2 := Domain{}
+		err = StorageDB.View(func(tx *bolt.Tx) error {
+			b := tx.Bucket([]byte("domains"))
+			v := b.Get([]byte(domain))
+			json.Unmarshal(v, &d2)
+			return nil
+		})
+		delete(d2.Records, recordID)
+		d2.Serial += 1
+		err = StorageDB.Update(func(tx *bolt.Tx) error {
+			b, err := tx.CreateBucketIfNotExists([]byte("domains"))
+			encoded, err := json.Marshal(d2)
+			if err != nil {
+				return nil
+			}
+			return b.Put([]byte(d2.Name), encoded)
+		})
+
+		if err == nil {
+			log.Printf("delete record for domain %q successful\n", domain)
+			http.Redirect(w, r, fmt.Sprintf("/record?domain=%s", domain), http.StatusSeeOther)
+		} else {
+			e := fmt.Sprintf("delete record for domain  %q fail, error: %s\n", domain, err)
+			w.Write([]byte(e))
+		}
+
+	default:
+		fmt.Println("unknown action")
+	}
+}
+
+func stringToMD5(s string) string {
+	has := md5.Sum([]byte(s))
+	return fmt.Sprintf("%x", has)
 }

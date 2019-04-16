@@ -48,7 +48,11 @@ $(document).ready(function() {
     var t = $('#example3').DataTable( {
             "order": [[ 1, "desc" ]]
         } );
- 
+
+    $('#table-record-list').DataTable( {
+        "order": [[ 0, "desc" ]]
+    } );
+
     $('#add-row').on( 'click', function () {
         if($("#add-row-form").isValid()) {
             var name = $('#name-input').val(),

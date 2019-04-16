@@ -40,7 +40,7 @@
         <div class="page-container">
             <!-- Page Sidebar -->
             <div class="page-sidebar">
-                <a class="logo-box" href="/domain">
+                <a class="logo-box" href="/">
                     <span>Bindwm</span>
                     <i class="icon-radio_button_unchecked" id="fixed-sidebar-toggle-button"></i>
                     <i class="icon-close" id="sidebar-toggle-button-close"></i>
@@ -49,7 +49,7 @@
                     <div class="page-sidebar-menu">
                         <ul class="accordion-menu">
                             <li>
-                                <a href="/domain">
+                                <a href="/">
                                     <i class="menu-icon icon-home4"></i><span>Domain</span>
                                 </a>
                             </li>
@@ -156,8 +156,8 @@
                             <div class="panel panel-white">
                                 <div class="panel-body">
 
-                                    <form id="add-domain-form" method="POST" action="/domain">
-                                        <label>New Domain</label><input name="domain-name" type="text" class="form-control" value="" />
+                                    <form id="add-domain-form" method="POST" action="/">
+                                        <label>New Domain</label><input name="domain-name" type="text" class="form-control" placeholder="example.com" required />
                                         <br>
                                         <input id="domain-input" type="submit" class="btn btn-success m-b-sm" value="Add new domain" />
                                     </form>
@@ -172,7 +172,7 @@
                                                 </tr>
                                             </thead>
                                             <tbody>
-                                            {{range .Data}}
+                                            {{range .}}
                                             <tr>
                                                 <td><a href="/record?domain={{.Name}}">{{.Name}}</a></td>
                                                 <td>{{.Created}}</td>
