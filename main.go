@@ -3,11 +3,14 @@ package main
 import (
 	"crypto/md5"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/boltdb/bolt"
 	"html/template"
+	"io/ioutil"
 	"log"
 	"net/http"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -114,22 +117,43 @@ func domainList(w http.ResponseWriter, r *http.Request) {
 				Created: time.Now().Format(TimeFormat),
 			}
 
-			err = StorageDB.Update(func(tx *bolt.Tx) error {
-				b, err := tx.CreateBucketIfNotExists([]byte("domains"))
-				if err != nil {
-					return err
-				}
-				encoded, err := json.Marshal(domain)
-				if err != nil {
-					return nil
-				}
-
-				return b.Put([]byte(domain.Name), encoded)
-			})
-
-			if err == nil {
-				log.Printf("domain %q add to DB successful\n", domain.Name)
+			rndc := RNDC{
+				CONFType: "domain",
+				Domain:   domain.Name,
 			}
+
+			err = rndc.genCONF(*domain)
+			if err != nil {
+				e := fmt.Errorf("save %q zone file fail, error: %s", domain.Name, err)
+				log.Println(e)
+				tmpl := template.Must(template.ParseFiles("tmpl/error-string.html"))
+				tmpl.Execute(w, e)
+			}
+			err = rndc.addzone()
+			if err != nil {
+				e := fmt.Errorf("add %q zone fail, error: %s", domain.Name, err)
+				log.Println(e)
+				tmpl := template.Must(template.ParseFiles("tmpl/error-string.html"))
+				tmpl.Execute(w, e)
+			} else {
+				err = StorageDB.Update(func(tx *bolt.Tx) error {
+					b, err := tx.CreateBucketIfNotExists([]byte("domains"))
+					if err != nil {
+						return err
+					}
+					encoded, err := json.Marshal(domain)
+					if err != nil {
+						return nil
+					}
+
+					return b.Put([]byte(domain.Name), encoded)
+				})
+
+				if err == nil {
+					log.Printf("domain %q add to DB successful\n", domain.Name)
+				}
+			}
+
 			http.Redirect(w, r, "/", http.StatusSeeOther)
 		} else {
 			log.Printf("domain %q is exist\n", domainForAdd)
@@ -178,6 +202,12 @@ func domainDel(w http.ResponseWriter, r *http.Request) {
 			}
 			return nil
 		})
+
+		rndc := RNDC{
+			Domain: domainForDel,
+		}
+
+		err = rndc.delzone()
 
 		if err == nil {
 			log.Printf("delete domain %q successful\n", domainForDel)
@@ -256,16 +286,35 @@ func recordList(w http.ResponseWriter, r *http.Request) {
 		d2.Serial += 1
 		d2.Records[recordID] = recordEntry
 
-		err = StorageDB.Update(func(tx *bolt.Tx) error {
-			b, err := tx.CreateBucketIfNotExists([]byte("domains"))
-			encoded, err := json.Marshal(d2)
-			if err != nil {
-				return nil
-			}
-			return b.Put([]byte(d2.Name), encoded)
-		})
+		rndc := RNDC{
+			Domain:   d2.Name,
+			CONFType: "record",
+		}
+		err = rndc.genCONF(d2)
+		if err != nil {
+			e := fmt.Errorf("save %q zone file fail, error: %s", d2.Name, err)
+			log.Println(e)
+			tmpl := template.Must(template.ParseFiles("tmpl/error-string.html"))
+			tmpl.Execute(w, e)
+		}
+		err = rndc.reloadzone()
+		if err != nil {
+			e := fmt.Errorf("add record for %q zone fail, error: %s", d2.Name, err)
+			log.Println(e)
+			tmpl := template.Must(template.ParseFiles("tmpl/error-string.html"))
+			tmpl.Execute(w, e)
+		} else {
+			err = StorageDB.Update(func(tx *bolt.Tx) error {
+				b, err := tx.CreateBucketIfNotExists([]byte("domains"))
+				encoded, err := json.Marshal(d2)
+				if err != nil {
+					return nil
+				}
+				return b.Put([]byte(d2.Name), encoded)
+			})
 
-		fmt.Printf("%#v\n", d2)
+			fmt.Printf("%#v\n", d2)
+		}
 
 		if err == nil {
 			log.Printf("add record for domain %q successful\n", domain)
@@ -346,6 +395,36 @@ func recordDel(w http.ResponseWriter, r *http.Request) {
 			return b.Put([]byte(d2.Name), encoded)
 		})
 
+		rndc := RNDC{
+			Domain:   d2.Name,
+			CONFType: "record",
+		}
+		err = rndc.genCONF(d2)
+		if err != nil {
+			e := fmt.Errorf("save %q zone file fail, error: %s", d2.Name, err)
+			log.Println(e)
+			tmpl := template.Must(template.ParseFiles("tmpl/error-string.html"))
+			tmpl.Execute(w, e)
+		}
+		err = rndc.reloadzone()
+		if err != nil {
+			e := fmt.Errorf("add record for %q zone fail, error: %s", d2.Name, err)
+			log.Println(e)
+			tmpl := template.Must(template.ParseFiles("tmpl/error-string.html"))
+			tmpl.Execute(w, e)
+		} else {
+			err = StorageDB.Update(func(tx *bolt.Tx) error {
+				b, err := tx.CreateBucketIfNotExists([]byte("domains"))
+				encoded, err := json.Marshal(d2)
+				if err != nil {
+					return nil
+				}
+				return b.Put([]byte(d2.Name), encoded)
+			})
+
+			fmt.Printf("%#v\n", d2)
+		}
+
 		if err == nil {
 			log.Printf("delete record for domain %q successful\n", domain)
 			http.Redirect(w, r, fmt.Sprintf("/record?domain=%s", domain), http.StatusSeeOther)
@@ -362,4 +441,97 @@ func recordDel(w http.ResponseWriter, r *http.Request) {
 func stringToMD5(s string) string {
 	has := md5.Sum([]byte(s))
 	return fmt.Sprintf("%x", has)
+}
+
+type RNDC struct {
+	Domain   string
+	CONFType string
+}
+
+func (r *RNDC) genCONF(domain Domain) (err error) {
+	switch r.CONFType {
+	case "domain":
+		fmt.Println("this is domain type")
+		CONFContent := fmt.Sprintf(`$TTL 600
+$ORIGIN %s.
+@	IN	SOA	%s.	root( 0 2H 30M 2W 1D )
+@	IN	NS	%s.
+`, r.Domain, "ns1.mylandnsserver.com", "ns1.mylandnsserver.com")
+		fileName := fmt.Sprintf("/var/named/%s.zone", r.Domain)
+		err = ioutil.WriteFile(fileName, []byte(CONFContent), 0644)
+		if err != nil {
+			return err
+		}
+		return nil
+	case "record":
+		fmt.Println("this is record type")
+
+		baseCONFContent := fmt.Sprintf(`$TTL 600
+$ORIGIN %s.
+@	IN	SOA	%s.	root( %d 2H 30M 2W 1D )
+@	IN	NS	%s.
+`, r.Domain, "ns1.mylandnsserver.com", domain.Serial, "ns1.mylandnsserver.com")
+
+		var recordContent string
+		for _, v := range domain.Records {
+			recordContent += fmt.Sprintf("%s\t%d\tIN\t%s\t%s\n", v.Record, v.TTL, v.Type, v.PointsTo)
+		}
+
+		fileName := fmt.Sprintf("/var/named/%s.zone", r.Domain)
+		err = ioutil.WriteFile(fileName, []byte(baseCONFContent+recordContent), 0644)
+		if err != nil {
+			return err
+		}
+
+		return nil
+	default:
+		err = errors.New("unknown conf type, you must specify like \"domain\" or \"record\"")
+		log.Println(err)
+		return err
+	}
+	return nil
+}
+
+func (r *RNDC) addzone() (err error) {
+	cmd := fmt.Sprintf("rndc addzone %s  '{type master; file \"%s.zone\";};'", r.Domain, r.Domain)
+	log.Println(cmd)
+	c := exec.Command("bash", "-c", cmd)
+	out, err := c.CombinedOutput()
+
+	if err != nil {
+		log.Printf("add zone %q fail, error: %s\n", r.Domain, string(out))
+		return err
+	} else {
+		err = r.reloadzone()
+		if err != nil {
+			return err
+		}
+		log.Printf("add zone %q to dns server successful", r.Domain)
+		return nil
+	}
+	return nil
+}
+
+func (r *RNDC) delzone() (err error) {
+	delzoneCMD := fmt.Sprintf("rndc delzone %s", r.Domain)
+	dc := exec.Command("bash", "-c", delzoneCMD)
+	dout, err := dc.CombinedOutput()
+	if err != nil {
+		log.Printf("delete zone %q fail, error: %s", r.Domain, string(dout))
+		return err
+	}
+	log.Printf("delete zone for %q successful", r.Domain)
+	return nil
+}
+
+func (r *RNDC) reloadzone() (err error) {
+	reloadCMD := fmt.Sprintf("rndc reload %s", r.Domain)
+	rc := exec.Command("bash", "-c", reloadCMD)
+	rout, err := rc.CombinedOutput()
+	if err != nil {
+		log.Printf("reload zone %q fail, error: %s", r.Domain, string(rout))
+		return err
+	}
+	log.Printf("reload for %q to  successful", r.Domain)
+	return nil
 }
